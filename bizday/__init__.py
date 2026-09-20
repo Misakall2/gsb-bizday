@@ -14,6 +14,8 @@ from .conventions import (
     UNADJUSTED,
 )
 
+__version__ = "1.0.0"
+
 __all__ = [
     "Calendar",
     "Convention",
@@ -23,4 +25,5 @@ __all__ = [
     "MODIFIED_FOLLOWING",
     "MODIFIED_PRECEDING",
     "UNADJUSTED",
+    "__version__",
 ]

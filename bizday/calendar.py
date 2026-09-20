@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import calendar as _cal
 from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .conventions import (
     FOLLOWING,
@@ -51,7 +51,19 @@ class Calendar:
                 raise ValueError(f"weekday out of range: {w}")
         self.holidays = frozenset(holidays)
         self.observance = normalize_convention(observance)
-        self.tz = ZoneInfo(tz) if isinstance(tz, str) else tz
+        if isinstance(tz, str):
+            try:
+                self.tz = ZoneInfo(tz)
+            except ZoneInfoNotFoundError as exc:
+                raise RuntimeError(
+                    f"cannot load timezone {tz!r}: the IANA tz database is "
+                    "not available on this system. Install the OS tzdata "
+                    "package (e.g. 'apt-get install tzdata' on Debian/Ubuntu, "
+                    "'apk add tzdata' on Alpine) and retry. Refusing to "
+                    "silently fall back to UTC."
+                ) from exc
+        else:
+            self.tz = tz
         if cutoff is not None and not isinstance(cutoff, time):
             raise TypeError("cutoff must be a datetime.time or None")
         self.cutoff = cutoff

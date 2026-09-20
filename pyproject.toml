@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bizday"
+dynamic = ["version"]
+description = "Multi-market business-day calendars: T+N settlement, EOM, cutoffs. Standard library only."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+# Runtime dependencies: none. The library uses only the Python standard
+# library (datetime + zoneinfo). Keep this list empty.
+dependencies = []
+
+[tool.setuptools]
+# Only the bizday package ships at runtime; tests/ is never installed.
+packages = ["bizday"]
+
+[tool.setuptools.dynamic]
+version = {attr = "bizday.__version__"}

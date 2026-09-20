@@ -1,10 +1,50 @@
-# gsb-bizday
+# bizday
 
-Python 3 stdlib only. `python3 -m unittest discover -s . -v`
+Multi-market business-day calendar library: weekends, observed holidays,
+T+N settlement, end-of-month stickiness, and trading-day cutoffs.
 
-## bizday
+- Python >= 3.9, **standard library only** (`datetime` + `zoneinfo`).
+  No runtime dependencies, nothing to `pip install` for the library itself.
+- Not a CLI, not a service. Embed it:
 
-Multi-market business-day calendar library. No dependencies, no CLI.
+```python
+from bizday import Calendar
+```
+
+## Run the tests
+
+The one and only test entry point, from the repository root:
+
+```sh
+python3 -m unittest discover
+```
+
+No pytest, no tox, no third-party packages required. A system IANA tz
+database must be present (it is, on any normal Linux/macOS install; on
+minimal containers run e.g. `apt-get install tzdata`). If tz data is
+missing, `Calendar` raises a `RuntimeError` saying so instead of silently
+assuming UTC.
+
+## Install
+
+```sh
+python3 -m pip install .
+```
+
+After that, `from bizday import Calendar` works from anywhere. The `tests/`
+directory is not part of the installed package.
+
+## Build a source distribution
+
+```sh
+python3 -m pip install build   # build-time tool only, not a runtime dep
+python3 -m build --sdist
+```
+
+The version is defined once, in `bizday/__init__.py` (`__version__`), and
+`pyproject.toml` picks it up from there.
+
+## Usage
 
 ```python
 from datetime import date, datetime, time
@@ -39,3 +79,8 @@ Rules worth knowing:
   is clamped (Jan 31 + 1mo -> Feb 28/29) then adjusted.
 - Naive datetimes are read in the calendar's timezone; aware ones are
   converted. DST transitions are handled by `zoneinfo`.
+
+## CI
+
+`.github/workflows/ci.yml` runs the same `python -m unittest discover`
+on clean GitHub-hosted runners across Python 3.9-3.12. It installs nothing.
