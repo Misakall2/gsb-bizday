@@ -3,6 +3,8 @@
 Standard library only (datetime + zoneinfo).
 """
 
+__version__ = "1.0.0"
+
 from .calendar import Calendar
 from .conventions import (
     Convention,

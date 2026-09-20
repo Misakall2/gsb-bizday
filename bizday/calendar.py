@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import calendar as _cal
 from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .conventions import (
     FOLLOWING,
@@ -51,11 +51,27 @@ class Calendar:
                 raise ValueError(f"weekday out of range: {w}")
         self.holidays = frozenset(holidays)
         self.observance = normalize_convention(observance)
-        self.tz = ZoneInfo(tz) if isinstance(tz, str) else tz
+        self.tz = self._load_zone(tz)
         if cutoff is not None and not isinstance(cutoff, time):
             raise TypeError("cutoff must be a datetime.time or None")
         self.cutoff = cutoff
         self._observed_cache = None
+
+    @staticmethod
+    def _load_zone(tz):
+        """Resolve an IANA timezone name, failing readably if tz data is absent."""
+        if not isinstance(tz, str):
+            return tz
+        try:
+            return ZoneInfo(tz)
+        except ZoneInfoNotFoundError as exc:
+            raise ZoneInfoNotFoundError(
+                f"unknown IANA timezone {tz!r}: the name is misspelled or this "
+                "host has no IANA time zone database. Install the OS tzdata "
+                "package (e.g. 'apt-get install tzdata' / 'apk add tzdata'); "
+                "bizday has no third-party dependencies and reads zone data "
+                "via the standard-library zoneinfo module only."
+            ) from exc
 
     # ------------------------------------------------------------------
     # basic predicates

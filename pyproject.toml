@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bizday"
+version = "1.0.0"
+description = "Multi-market business-day calendars: weekends, observed holidays, T+N settlement, EOM, cutoffs."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+# Runtime dependencies: none. Standard library only (datetime, zoneinfo).
+dependencies = []
+
+[tool.setuptools]
+packages = ["bizday"]

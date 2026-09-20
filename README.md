@@ -1,10 +1,45 @@
 # gsb-bizday
 
-Python 3 stdlib only. `python3 -m unittest discover -s . -v`
+Multi-market business-day calendar library. Python >= 3.9, standard library
+only (`datetime` + `zoneinfo`). No runtime dependencies, no CLI, no web
+service.
+
+## Run the tests (the only entry point)
+
+From the repository root:
+
+```sh
+python3 -m unittest discover
+```
+
+That is the whole test workflow. No pytest, no tox, nothing to install.
+The same command runs in CI (`.github/workflows/ci.yml`) on a clean machine.
+
+Time zone handling uses the standard-library `zoneinfo` module, which reads
+the host's IANA time zone database. Linux/macOS systems have it; on a minimal
+container install the OS `tzdata` package. If the data is missing, `Calendar`
+raises a `ZoneInfoNotFoundError` telling you exactly that -- it never falls
+back to UTC silently.
+
+## Install / package
+
+```sh
+python3 -m pip install .          # or: pip install git+<repo-url>
+python3 -m build --sdist          # produces dist/bizday-<version>.tar.gz
+```
+
+After installation the public import contract is unchanged:
+
+```python
+from bizday import Calendar
+```
+
+`bizday.__version__` matches the `version` field in `pyproject.toml`.
+`dependencies` there is empty on purpose: the library is stdlib-only and
+must stay that way. The `tests/` directory is not part of the installed
+package.
 
 ## bizday
-
-Multi-market business-day calendar library. No dependencies, no CLI.
 
 ```python
 from datetime import date, datetime, time
