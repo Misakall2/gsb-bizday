@@ -39,3 +39,57 @@ Rules worth knowing:
   is clamped (Jan 31 + 1mo -> Feb 28/29) then adjusted.
 - Naive datetimes are read in the calendar's timezone; aware ones are
   converted. DST transitions are handled by `zoneinfo`.
+
+## Composite calendars
+
+```python
+from bizday import CompositeCalendar, JOIN, EITHER
+
+join = CompositeCalendar([ny, london], JOIN)      # both open -> open
+either = CompositeCalendar([shanghai, ny], EITHER) # either open -> open
+join.settle_date(datetime(2024, 3, 8, 17, 30), 1)  # shift/adjust/cutoff work
+```
+
+Each constituent applies its own weekend shape and holiday observance
+*first*; only the resulting business-day predicates are combined. The
+composite carries its own `tz`/`cutoff` (default: first constituent's).
+Constituents without an IANA timezone, out-of-range weekday numbers, an
+unknown mode, or fewer than two calendars all raise immediately.
+
+## Multi-leg trades
+
+```python
+from bizday import schedule_trade
+
+t = schedule_trade(trade_dt, trade_cal, fixing_cal, n_fix, payment_cal, n_pay)
+t.trade_date; t.fixing_date; t.payment_date
+```
+
+The trade datetime lands on a trade date via the trade calendar's cutoff;
+the fixing date is `n_fix` business days from there on the fixing calendar
+(`n_fix` may be 0 or negative); the payment date is `n_pay` business days
+from the fixing date on the payment calendar. Any leg may be a
+`CompositeCalendar`. Pinned rule: when `n_fix == 0 and n_pay == 0` (one
+date is trade, fixing and payment at once), the *payment* calendar's
+cutoff is authoritative for the trade datetime.
+
+## Coupon schedules
+
+```python
+from bizday import coupon_schedule
+
+periods = coupon_schedule(cal, start, end, step_months=3,
+                          convention="modified_following",
+                          eom_sticky=True, stub="back", long_stub=False,
+                          on_collision="drop")
+```
+
+Unadjusted anchors are rolled from the maturity backward (`stub="back"`,
+residual at the front) or from the start forward (`stub="front"`, residual
+at the end); `long_stub=True` merges the residual into its neighbour.
+`eom_sticky` keeps month-end starts glued to month-end (Jan 31 -> Feb
+28/29). Each period's payment date is its own unadjusted end adjusted
+individually -- the string is never shifted as a whole. Pinned collision
+rule: an adjusted payment that lands exactly on the *next* period's
+unadjusted end anchor is dropped by default; `on_collision="error"`
+raises instead.
