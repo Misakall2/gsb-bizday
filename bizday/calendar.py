@@ -1,21 +1,31 @@
-"""Market calendar: weekends, observed holidays, T+N, EOM, cutoffs."""
+"""Market calendar facade: weekends, observed holidays, T+N, EOM, cutoffs.
+
+This module only wires the pieces together and owns the public API.
+The responsibilities live in focused modules, layered bottom-up:
+
+    conventions  English/Chinese name normalization (single place)
+    observance   weekend layout + observed-holiday resolution
+    workdays     business-day stepping, adjust conventions, T+N
+    months       end-of-month sticky month arithmetic
+    cutoff       timezone localization + the daily cutoff rule
+
+Each layer depends only on the ones listed above it.
+"""
 
 from __future__ import annotations
 
-import calendar as _cal
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 from .conventions import (
     FOLLOWING,
-    PRECEDING,
-    MODIFIED_FOLLOWING,
-    MODIFIED_PRECEDING,
     UNADJUSTED,
     normalize_convention,
 )
-
-_ONE_DAY = timedelta(days=1)
+from .observance import Observance
+from .workdays import Workdays
+from .months import MonthArithmetic
+from .cutoff import CutoffClock
 
 
 class Calendar:
@@ -55,99 +65,63 @@ class Calendar:
         if cutoff is not None and not isinstance(cutoff, time):
             raise TypeError("cutoff must be a datetime.time or None")
         self.cutoff = cutoff
-        self._observed_cache = None
+        self._engine_key = None
+        self._observance = None
+        self._workdays = None
+        self._months = None
+        self._clock = None
+
+    # ------------------------------------------------------------------
+    # engine wiring
+    # ------------------------------------------------------------------
+    def _engine(self):
+        """The layer stack for the current attribute values.
+
+        Rebuilt whenever weekend/holidays/observance/tz/cutoff change,
+        so the observed-holiday cache inside Observance can never go
+        stale after the caller edits the holiday table.
+        """
+        key = (self.weekend, self.holidays, self.observance,
+               self.tz, self.cutoff)
+        if key != self._engine_key:
+            self._observance = Observance(self.weekend, self.holidays,
+                                          self.observance)
+            self._workdays = Workdays(self._observance)
+            self._months = MonthArithmetic(self._workdays)
+            self._clock = CutoffClock(self.tz, self.cutoff, self._workdays)
+            self._engine_key = key
+        return self._observance, self._workdays, self._months, self._clock
 
     # ------------------------------------------------------------------
     # basic predicates
     # ------------------------------------------------------------------
     def is_weekend(self, d: date) -> bool:
-        return d.weekday() in self.weekend
+        observance, _, _, _ = self._engine()
+        return observance.is_weekend(d)
 
     def observed_holidays(self) -> frozenset:
         """Holidays after applying the observance rule to weekend hits."""
-        if self._observed_cache is not None:
-            return self._observed_cache
-        out = set()
-        for h in self.holidays:
-            if self.is_weekend(h):
-                out.add(self._observe(h))
-            else:
-                out.add(h)
-        self._observed_cache = frozenset(out)
-        return self._observed_cache
-
-    def _observe(self, h: date) -> date:
-        """Move a weekend holiday per the observance rule.
-
-        Only raw weekends and the raw holiday table are considered here,
-        so this never recurses into observed_holidays().
-        """
-        if self.observance == UNADJUSTED:
-            return h
-
-        def raw_ok(d: date) -> bool:
-            return not self.is_weekend(d) and d not in self.holidays
-
-        def raw_step(d: date, direction: int) -> date:
-            d += direction * _ONE_DAY
-            while not raw_ok(d):
-                d += direction * _ONE_DAY
-            return d
-
-        if self.observance == FOLLOWING:
-            return raw_step(h, +1)
-        if self.observance == PRECEDING:
-            return raw_step(h, -1)
-        if self.observance == MODIFIED_FOLLOWING:
-            fwd = raw_step(h, +1)
-            return fwd if fwd.month == h.month else raw_step(h, -1)
-        if self.observance == MODIFIED_PRECEDING:
-            back = raw_step(h, -1)
-            return back if back.month == h.month else raw_step(h, +1)
-        raise ValueError(f"unknown observance: {self.observance!r}")
+        observance, _, _, _ = self._engine()
+        return observance.observed()
 
     def is_holiday(self, d: date) -> bool:
-        return d in self.observed_holidays()
+        observance, _, _, _ = self._engine()
+        return observance.is_holiday(d)
 
     def is_business_day(self, d: date) -> bool:
-        return not self.is_weekend(d) and not self.is_holiday(d)
+        _, workdays, _, _ = self._engine()
+        return workdays.is_business_day(d)
 
     # ------------------------------------------------------------------
     # date adjustment conventions
     # ------------------------------------------------------------------
-    def _step(self, d: date, direction: int) -> date:
-        d += direction * _ONE_DAY
-        while not self.is_business_day(d):
-            d += direction * _ONE_DAY
-        return d
-
-    def _adjust_raw(self, d: date, convention: str) -> date:
-        """Adjust without consulting the observed-holiday cache."""
-        if convention == UNADJUSTED:
-            return d
-        if convention == FOLLOWING:
-            return self._step(d, +1)
-        if convention == PRECEDING:
-            return self._step(d, -1)
-        if convention == MODIFIED_FOLLOWING:
-            fwd = self._step(d, +1)
-            return fwd if fwd.month == d.month else self._step(d, -1)
-        if convention == MODIFIED_PRECEDING:
-            back = self._step(d, -1)
-            return back if back.month == d.month else self._step(d, +1)
-        raise ValueError(f"unknown convention: {convention!r}")
-
     def adjust(self, d: date, convention=FOLLOWING) -> date:
         """Adjust ``d`` to a business day per the convention.
 
         ``unadjusted`` returns ``d`` unchanged, even on weekends/holidays.
         """
-        convention = normalize_convention(convention)
-        if convention == UNADJUSTED:
-            return d
-        if self.is_business_day(d):
-            return d
-        return self._adjust_raw(d, convention)
+        _, workdays, _, _ = self._engine()
+        return workdays.adjust(d, normalize_convention(convention))
 
     # ------------------------------------------------------------------
     # T+N (business days, N may be 0 or negative)
@@ -159,38 +133,24 @@ class Calendar:
         ``convention``). Positive ``n`` rolls forward, negative rolls
         backward; consecutive holidays/weekends are skipped as one run.
         """
-        if not isinstance(n, int):
-            raise TypeError("n must be an int")
-        if n == 0:
-            return self.adjust(start, convention)
-        d = start
-        step = +1 if n > 0 else -1
-        for _ in range(abs(n)):
-            d = self._step(d, step)
-        return d
+        _, workdays, _, _ = self._engine()
+        return workdays.shift(start, n, normalize_convention(convention))
 
     def business_days_between(self, start: date, end: date) -> int:
         """Signed count of business-day steps from start to end."""
-        if start == end:
-            return 0
-        step = +1 if end > start else -1
-        d, count = start, 0
-        while d != end:
-            d = self._step(d, step)
-            count += step
-        return count
+        _, workdays, _, _ = self._engine()
+        return workdays.business_days_between(start, end)
 
     # ------------------------------------------------------------------
     # month arithmetic with end-of-month stickiness
     # ------------------------------------------------------------------
     def is_month_end_business_day(self, d: date) -> bool:
-        return self.is_business_day(d) and self._step(d, +1).month != d.month
+        _, _, months, _ = self._engine()
+        return months.is_month_end_business_day(d)
 
     def last_business_day_of_month(self, year: int, month: int) -> date:
-        d = date(year, month, _cal.monthrange(year, month)[1])
-        while not self.is_business_day(d):
-            d -= _ONE_DAY
-        return d
+        _, _, months, _ = self._engine()
+        return months.last_business_day_of_month(year, month)
 
     def add_months(self, d: date, months: int, convention=FOLLOWING) -> date:
         """Add calendar months with EOM stickiness.
@@ -200,13 +160,8 @@ class Calendar:
         is preserved where possible (clamped, e.g. Jan 31 + 1mo -> Feb 28
         or Feb 29 in a leap year) and then adjusted per ``convention``.
         """
-        total = d.year * 12 + (d.month - 1) + months
-        year, month = divmod(total, 12)
-        month += 1
-        if self.is_month_end_business_day(d):
-            return self.last_business_day_of_month(year, month)
-        day = min(d.day, _cal.monthrange(year, month)[1])
-        return self.adjust(date(year, month, day), convention)
+        _, _, month_arith, _ = self._engine()
+        return month_arith.add_months(d, months, normalize_convention(convention))
 
     # ------------------------------------------------------------------
     # datetimes, timezones, cutoffs
@@ -218,11 +173,8 @@ class Calendar:
         be in the market's local time. DST transitions are handled by
         zoneinfo, so spring-forward/fall-back days do not blow up.
         """
-        if not isinstance(dt, datetime):
-            raise TypeError("expected a datetime")
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=self.tz)
-        return dt.astimezone(self.tz)
+        _, _, _, clock = self._engine()
+        return clock.localize(dt)
 
     def trade_date(self, dt) -> date:
         """The business date a trade belongs to, after the cutoff rule.
@@ -231,16 +183,8 @@ class Calendar:
         day; exactly at the cutoff stays on the same day. The result is
         always a business day.
         """
-        if isinstance(dt, datetime):
-            local = self.localize(dt)
-            d = local.date()
-            if self.cutoff is not None and local.timetz().replace(tzinfo=None) > self.cutoff:
-                d = self._step(d, +1)
-        elif isinstance(dt, date):
-            d = dt
-        else:
-            raise TypeError("expected a date or datetime")
-        return self.adjust(d, FOLLOWING)
+        _, _, _, clock = self._engine()
+        return clock.trade_date(dt)
 
     def settle_date(self, dt, n: int, convention=FOLLOWING) -> date:
         """T+N settlement date for a trade done at ``dt`` (date or datetime).
