@@ -1,21 +1,35 @@
-"""Market calendar: weekends, observed holidays, T+N, EOM, cutoffs."""
+"""Market calendar: composition root for the bizday modules.
+
+The pieces live in focused modules with a one-way dependency chain::
+
+    conventions (name normalization)
+        ^
+    observance (weekends, observed holidays, cached)
+        ^
+    adjustment (business-day stepping, adjust/shift)
+        ^
+    months (EOM sticky add_months)
+
+    cutoff (localize + cutoff trade date) -> observance + adjustment
+
+``Calendar`` itself stays immutable and per-market: it only wires a
+:class:`~bizday.observance.HolidayTable`, a timezone and a cutoff
+together and delegates. Each market gets its own instance; there is
+no global state.
+"""
 
 from __future__ import annotations
 
-import calendar as _cal
-from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, time
 
+from . import adjustment, months
+from . import cutoff as _cutoff
 from .conventions import (
     FOLLOWING,
-    PRECEDING,
-    MODIFIED_FOLLOWING,
-    MODIFIED_PRECEDING,
     UNADJUSTED,
     normalize_convention,
 )
-
-_ONE_DAY = timedelta(days=1)
+from .observance import HolidayTable
 
 
 class Calendar:
@@ -45,113 +59,72 @@ class Calendar:
 
     def __init__(self, weekend=(5, 6), holidays=(), observance=UNADJUSTED,
                  tz="UTC", cutoff=None):
-        self.weekend = frozenset(weekend)
-        for w in self.weekend:
-            if not 0 <= w <= 6:
-                raise ValueError(f"weekday out of range: {w}")
-        self.holidays = frozenset(holidays)
-        self.observance = normalize_convention(observance)
-        self.tz = ZoneInfo(tz) if isinstance(tz, str) else tz
+        observance = normalize_convention(observance)
         if cutoff is not None and not isinstance(cutoff, time):
             raise TypeError("cutoff must be a datetime.time or None")
+        self._table = HolidayTable(weekend, holidays, observance)
+        self._zone = _cutoff.resolve_timezone(tz)
         self.cutoff = cutoff
-        self._observed_cache = None
+
+    # -- construction, never mutation --------------------------------
+    def replace(self, **changes):
+        """Return a new Calendar with the given construction args replaced.
+
+        The instance is immutable on purpose; a changed holiday set is
+        a new calendar, which also gets a fresh observance cache.
+        """
+        args = {
+            "weekend": self.weekend,
+            "holidays": self.holidays,
+            "observance": self.observance,
+            "tz": self.tz,
+            "cutoff": self.cutoff,
+        }
+        args.update(changes)
+        return type(self)(**args)
+
+    # -- exposed configuration ---------------------------------------
+    @property
+    def weekend(self) -> frozenset:
+        return self._table.weekend
+
+    @property
+    def holidays(self) -> frozenset:
+        return self._table.holidays
+
+    @property
+    def observance(self) -> str:
+        return self._table.observance
+
+    @property
+    def tz(self):
+        return self._zone
 
     # ------------------------------------------------------------------
-    # basic predicates
+    # weekend / holiday predicates (observance)
     # ------------------------------------------------------------------
     def is_weekend(self, d: date) -> bool:
-        return d.weekday() in self.weekend
+        return self._table.is_weekend(d)
 
     def observed_holidays(self) -> frozenset:
-        """Holidays after applying the observance rule to weekend hits."""
-        if self._observed_cache is not None:
-            return self._observed_cache
-        out = set()
-        for h in self.holidays:
-            if self.is_weekend(h):
-                out.add(self._observe(h))
-            else:
-                out.add(h)
-        self._observed_cache = frozenset(out)
-        return self._observed_cache
-
-    def _observe(self, h: date) -> date:
-        """Move a weekend holiday per the observance rule.
-
-        Only raw weekends and the raw holiday table are considered here,
-        so this never recurses into observed_holidays().
-        """
-        if self.observance == UNADJUSTED:
-            return h
-
-        def raw_ok(d: date) -> bool:
-            return not self.is_weekend(d) and d not in self.holidays
-
-        def raw_step(d: date, direction: int) -> date:
-            d += direction * _ONE_DAY
-            while not raw_ok(d):
-                d += direction * _ONE_DAY
-            return d
-
-        if self.observance == FOLLOWING:
-            return raw_step(h, +1)
-        if self.observance == PRECEDING:
-            return raw_step(h, -1)
-        if self.observance == MODIFIED_FOLLOWING:
-            fwd = raw_step(h, +1)
-            return fwd if fwd.month == h.month else raw_step(h, -1)
-        if self.observance == MODIFIED_PRECEDING:
-            back = raw_step(h, -1)
-            return back if back.month == h.month else raw_step(h, +1)
-        raise ValueError(f"unknown observance: {self.observance!r}")
+        return self._table.observed_holidays()
 
     def is_holiday(self, d: date) -> bool:
-        return d in self.observed_holidays()
+        return self._table.is_holiday(d)
 
     def is_business_day(self, d: date) -> bool:
-        return not self.is_weekend(d) and not self.is_holiday(d)
+        return self._table.is_business_day(d)
 
     # ------------------------------------------------------------------
-    # date adjustment conventions
+    # date adjustment and T+N
     # ------------------------------------------------------------------
-    def _step(self, d: date, direction: int) -> date:
-        d += direction * _ONE_DAY
-        while not self.is_business_day(d):
-            d += direction * _ONE_DAY
-        return d
-
-    def _adjust_raw(self, d: date, convention: str) -> date:
-        """Adjust without consulting the observed-holiday cache."""
-        if convention == UNADJUSTED:
-            return d
-        if convention == FOLLOWING:
-            return self._step(d, +1)
-        if convention == PRECEDING:
-            return self._step(d, -1)
-        if convention == MODIFIED_FOLLOWING:
-            fwd = self._step(d, +1)
-            return fwd if fwd.month == d.month else self._step(d, -1)
-        if convention == MODIFIED_PRECEDING:
-            back = self._step(d, -1)
-            return back if back.month == d.month else self._step(d, +1)
-        raise ValueError(f"unknown convention: {convention!r}")
-
     def adjust(self, d: date, convention=FOLLOWING) -> date:
         """Adjust ``d`` to a business day per the convention.
 
         ``unadjusted`` returns ``d`` unchanged, even on weekends/holidays.
         """
-        convention = normalize_convention(convention)
-        if convention == UNADJUSTED:
-            return d
-        if self.is_business_day(d):
-            return d
-        return self._adjust_raw(d, convention)
+        return adjustment.adjust(self._table, d, convention)
 
-    # ------------------------------------------------------------------
-    # T+N (business days, N may be 0 or negative)
-    # ------------------------------------------------------------------
     def shift(self, start: date, n: int, convention=FOLLOWING) -> date:
         """Move ``n`` business days from ``start``.
 
@@ -159,40 +132,22 @@ class Calendar:
         ``convention``). Positive ``n`` rolls forward, negative rolls
         backward; consecutive holidays/weekends are skipped as one run.
         """
-        if not isinstance(n, int):
-            raise TypeError("n must be an int")
-        if n == 0:
-            return self.adjust(start, convention)
-        d = start
-        step = +1 if n > 0 else -1
-        for _ in range(abs(n)):
-            d = self._step(d, step)
-        return d
+        return adjustment.shift(self._table, start, n, convention)
 
     def business_days_between(self, start: date, end: date) -> int:
         """Signed count of business-day steps from start to end."""
-        if start == end:
-            return 0
-        step = +1 if end > start else -1
-        d, count = start, 0
-        while d != end:
-            d = self._step(d, step)
-            count += step
-        return count
+        return adjustment.business_days_between(self._table, start, end)
 
     # ------------------------------------------------------------------
     # month arithmetic with end-of-month stickiness
     # ------------------------------------------------------------------
     def is_month_end_business_day(self, d: date) -> bool:
-        return self.is_business_day(d) and self._step(d, +1).month != d.month
+        return months.is_month_end_business_day(self._table, d)
 
     def last_business_day_of_month(self, year: int, month: int) -> date:
-        d = date(year, month, _cal.monthrange(year, month)[1])
-        while not self.is_business_day(d):
-            d -= _ONE_DAY
-        return d
+        return months.last_business_day_of_month(self._table, year, month)
 
-    def add_months(self, d: date, months: int, convention=FOLLOWING) -> date:
+    def add_months(self, d: date, months_n: int, convention=FOLLOWING) -> date:
         """Add calendar months with EOM stickiness.
 
         If ``d`` is the last business day of its month, the result is the
@@ -200,13 +155,7 @@ class Calendar:
         is preserved where possible (clamped, e.g. Jan 31 + 1mo -> Feb 28
         or Feb 29 in a leap year) and then adjusted per ``convention``.
         """
-        total = d.year * 12 + (d.month - 1) + months
-        year, month = divmod(total, 12)
-        month += 1
-        if self.is_month_end_business_day(d):
-            return self.last_business_day_of_month(year, month)
-        day = min(d.day, _cal.monthrange(year, month)[1])
-        return self.adjust(date(year, month, day), convention)
+        return months.add_months(self._table, d, months_n, convention)
 
     # ------------------------------------------------------------------
     # datetimes, timezones, cutoffs
@@ -218,11 +167,7 @@ class Calendar:
         be in the market's local time. DST transitions are handled by
         zoneinfo, so spring-forward/fall-back days do not blow up.
         """
-        if not isinstance(dt, datetime):
-            raise TypeError("expected a datetime")
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=self.tz)
-        return dt.astimezone(self.tz)
+        return _cutoff.localize(self._zone, dt)
 
     def trade_date(self, dt) -> date:
         """The business date a trade belongs to, after the cutoff rule.
@@ -231,16 +176,7 @@ class Calendar:
         day; exactly at the cutoff stays on the same day. The result is
         always a business day.
         """
-        if isinstance(dt, datetime):
-            local = self.localize(dt)
-            d = local.date()
-            if self.cutoff is not None and local.timetz().replace(tzinfo=None) > self.cutoff:
-                d = self._step(d, +1)
-        elif isinstance(dt, date):
-            d = dt
-        else:
-            raise TypeError("expected a date or datetime")
-        return self.adjust(d, FOLLOWING)
+        return _cutoff.trade_date(self._table, self._zone, self.cutoff, dt)
 
     def settle_date(self, dt, n: int, convention=FOLLOWING) -> date:
         """T+N settlement date for a trade done at ``dt`` (date or datetime).
